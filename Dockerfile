@@ -1,10 +1,20 @@
-FROM ubuntu
+FROM python:3.12-slim
 
-RUN apt-get update
-RUN apt-get install -y python3-flask
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-COPY app.py /opt/app.py
+WORKDIR /app
 
-ENV FLASK_APP=/opt/app.py
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-ENTRYPOINT ["flask", "run", "--host=0.0.0.0"]
+COPY app.py .
+
+RUN useradd --create-home appuser \
+    && chown -R appuser:appuser /app
+
+USER appuser
+
+EXPOSE 8000
+
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]
