@@ -1,0 +1,146 @@
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Task 12 - Flask application behind an ALB with Auto Scaling
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC created by the task12-network stack
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet::Id
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet::Id
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup::Id
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup::Id
+
+Resources:
+  AppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: task12-flask-targets
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 8000
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health
+      Matcher:
+        HttpCode: "200"
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: task12-flask-alb
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AppTargetGroup
+
+  AppLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: task12-flask-launch-template
+      LaunchTemplateData:
+        ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+        InstanceType: t3.micro
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: true
+            Groups:
+              - !Ref AppSecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euxo pipefail
+
+            dnf install -y python3 python3-pip
+            mkdir -p /opt/flask-app
+            python3 -m venv /opt/flask-app/venv
+            /opt/flask-app/venv/bin/pip install Flask gunicorn
+
+            cat > /opt/flask-app/app.py <<'PY'
+            from flask import Flask, jsonify
+
+            app = Flask(__name__)
+
+            @app.route("/")
+            def home():
+                return "Hello from the scalable Flask app!"
+
+            @app.route("/health")
+            def health():
+                return jsonify(status="healthy"), 200
+            PY
+
+            cat > /etc/systemd/system/flask-app.service <<'SERVICE'
+            [Unit]
+            Description=Flask application
+            After=network.target
+
+            [Service]
+            WorkingDirectory=/opt/flask-app
+            ExecStart=/opt/flask-app/venv/bin/gunicorn --bind 0.0.0.0:8000 app:app
+            Restart=always
+
+            [Install]
+            WantedBy=multi-user.target
+            SERVICE
+
+            systemctl daemon-reload
+            systemctl enable --now flask-app
+
+  AppAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: ALBListener
+    Properties:
+      AutoScalingGroupName: task12-flask-asg
+      VPCZoneIdentifier:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref AppLaunchTemplate
+        Version: !GetAtt AppLaunchTemplate.LatestVersionNumber
+      MinSize: "2"
+      MaxSize: "4"
+      DesiredCapacity: "2"
+      TargetGroupARNs:
+        - !Ref AppTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: task12-flask-app
+          PropagateAtLaunch: true
+
+Outputs:
+  LoadBalancerDNS:
+    Description: Public URL of the Flask application
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+
+  AutoScalingGroupName:
+    Value: !Ref AppAutoScalingGroup
+
+  TargetGroupArn:
+    Description: Target group used by the ALB
+    Value: !Ref AppTargetGroup
+
